@@ -81,6 +81,8 @@ type iface = string [@@deriving rpcty]
 
 type port = string [@@deriving rpcty]
 
+type tunnel = string [@@deriving rpcty]
+
 type bridge = string [@@deriving rpcty]
 
 (* rpcty cannot handle polymorphic variant, so change the definition to variant *)
@@ -166,8 +168,16 @@ type port_config_t = {
 }
 [@@deriving rpcty]
 
+type tunnel_config_t = {
+    remote_ip: string option [@default None]
+  ; protocol: string option [@default None]
+  ; tunnel_id: string option [@default None]
+}
+[@@deriving rpcty]
+
 type bridge_config_t = {
-    ports: (port * port_config_t) list [@default []]
+    tunnels: (tunnel * tunnel_config_t) list [@default []]
+  ; ports: (port * port_config_t) list [@default []]
   ; vlan: (bridge * int) option [@default None]
   ; bridge_mac: string option [@default None]
   ; igmp_snooping: bool option [@default None]
@@ -201,7 +211,8 @@ let default_interface =
 
 let default_bridge =
   {
-    ports= []
+    tunnels= []
+  ; ports= []
   ; vlan= None
   ; bridge_mac= None
   ; igmp_snooping= None
@@ -655,6 +666,39 @@ module Interface_API (R : RPC) = struct
         @-> returning unit_p err
         )
 
+    let add_tunnel =
+      let module T = struct
+        type _remote_ip_opt_t = string option [@@deriving rpcty]
+
+        type _protocol_opt_t = string option [@@deriving rpcty]
+
+        type _tunnel_id_opt_t = string option [@@deriving rpcty]
+      end in
+      let bridge_p =
+        Param.mk ~name:"bridge" ~description:["bridge name"] bridge
+      in
+      let tunnel_port_p =
+        Param.mk ~name:"tunnel_port" ~description:["tunnel port name"] tunnel
+      in
+      let remote_ip_p =
+        Param.mk ~name:"remote_ip" ~description:["tunnel remote endpoint ip"] T._remote_ip_opt_t
+      in
+      let protocol_p =
+          Param.mk ~name:"protocol" ~description:["tunnel protocol"] T._protocol_opt_t
+      in
+      let tunnel_id_p =
+        Param.mk ~name:"tunnel_id" ~description:["tunnel vxlan id"] T._tunnel_id_opt_t
+      in
+      declare "Bridge.add_tunnel" ["Add tunnel"]
+        (debug_info_p
+        @-> bridge_p
+        @-> tunnel_port_p
+        @-> remote_ip_p
+        @-> protocol_p
+        @-> tunnel_id_p
+        @-> returning unit_p err
+        )
+
     let remove_port =
       let bridge_p =
         Param.mk ~name:"bridge" ~description:["bridge name"] bridge
@@ -662,6 +706,14 @@ module Interface_API (R : RPC) = struct
       let name_p = Param.mk ~name:"name" ~description:["port name"] port in
       declare "Bridge.remove_port" ["Remove port"]
         (debug_info_p @-> bridge_p @-> name_p @-> returning unit_p err)
+
+    let remove_tunnel =
+      let bridge_p =
+        Param.mk ~name:"bridge" ~description:["bridge name"] bridge
+      in
+      let tunnel_p = Param.mk ~name:"tunnel" ~description:["tunnel name"] tunnel in
+      declare "Bridge.remove_tunnel" ["Remove tunnel"]
+        (debug_info_p @-> bridge_p @-> tunnel_p @-> returning unit_p err)
 
     let get_interfaces =
       let module T = struct

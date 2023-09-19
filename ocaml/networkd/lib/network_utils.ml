@@ -35,6 +35,7 @@ type util_error =
   | No_sriov_capability
   | Vf_sysfs_path_not_found
   | Fail_to_unbind_from_driver
+  | Fail_to_deploy_firewall_rule
   | Other
 
 let iproute2 = "/sbin/ip"
@@ -72,6 +73,10 @@ let dracut_timeout = ref 180.0
 let fcoedriver = ref "/opt/xensource/libexec/fcoe_driver"
 
 let inject_igmp_query_script = ref "/usr/libexec/xenopsd/igmp_query_injector.py"
+
+let iptables = ref "/sbin/iptables"
+
+let ip6tables = ref "/sbin/ip6tables" (* support host ipv6 network in future *)
 
 let mac_table_size = ref 10000
 
@@ -1455,6 +1460,16 @@ module Ovs = struct
       in
       ["--"; "--may-exist"; "add-port"; bridge; name] @ type_args
 
+    let create_tunnel_port_arg proto remote_ip udp_port name bridge vni=
+      let protocol = Printf.sprintf "type=%s" proto in
+      let remote = Printf.sprintf "options:remote_ip=%s" remote_ip in
+      let dst_port = Printf.sprintf "options:dst_port=%d" udp_port in
+      let key = Printf.sprintf "options:key=%d" vni in
+      let type_args =
+        ["--"; "set"; "interface"; name; protocol; remote; dst_port; key]
+      in
+      ["--"; "--may-exist"; "add-port"; bridge; name] @ type_args
+
     let create_bridge ?mac ?external_id ?disable_in_band ?igmp_snooping
         ~fail_mode vlan vlan_bug_workaround name =
       let vlan_arg =
@@ -1665,6 +1680,11 @@ module Ovs = struct
     let create_port ?(internal = false) name bridge =
       let ty = if internal then Some "internal" else None in
       vsctl (create_port_arg ?ty name bridge)
+
+    let create_tunnel_port proto remote_ip udp_port name bridge vni =
+      (* currently we only support ipv4 network, in future we will support ipv6 *)
+      (* here proto is always VxLAN *)
+      vsctl (create_tunnel_port_arg proto remote_ip udp_port name bridge vni)
 
     let destroy_port name =
       vsctl ["--"; "--with-iface"; "--if-exists"; "del-port"; name]
@@ -2105,4 +2125,38 @@ module Modprobe = struct
     | false, true ->
         Result.Error
           (Other, "enabling SR-IOV via modprobe never comes here for: " ^ driver)
+end
+
+module Firewall = struct
+  let add_allow_v4_inbound_rule proto port =
+    let cmdline = (Printf.sprintf "%s -A INPUT -p %s --dport %d -j ACCEPT" !iptables proto port) in
+    let retval = Sys.command cmdline in
+    if retval <> 0 then
+      Result.Error (Fail_to_deploy_firewall_rule, Printf.sprintf "%s: exitted with %d" cmdline retval)
+    else
+      Result.Ok ()
+
+  let del_allow_v4_inbound_rule proto port =
+    let cmdline = (Printf.sprintf "%s -D INPUT -p %s --dport %d -j ACCEPT" !iptables proto port) in
+    let retval = Sys.command cmdline in
+    if retval <> 0 then
+      Result.Error (Fail_to_deploy_firewall_rule, Printf.sprintf "%s: exitted with %d" cmdline retval)
+    else
+      Result.Ok ()
+
+  let add_allow_v4_outbound_rule proto port =
+    let cmdline = (Printf.sprintf "%s -A OUTPUT -p %s --dport %d -j ACCEPT" !iptables proto port) in
+    let retval = Sys.command cmdline in
+    if retval <> 0 then
+      Result.Error (Fail_to_deploy_firewall_rule, Printf.sprintf "%s: exitted with %d" cmdline retval)
+    else
+      Result.Ok ()
+
+  let del_allow_v4_outbound_rule proto port =
+    let cmdline = (Printf.sprintf "%s -D OUTPUT -p %s --dport %d -j ACCEPT" !iptables proto port) in
+    let retval = Sys.command cmdline in
+    if retval <> 0 then
+      Result.Error (Fail_to_deploy_firewall_rule, Printf.sprintf "%s: exitted with %d" cmdline retval)
+    else
+      Result.Ok ()
 end

@@ -1329,6 +1329,43 @@ module Bridge = struct
       )
       ()
 
+  let add_tunnel dbg bridge tunnel_port remote_ip protocol tunnel_id =
+    Debug.with_thread_associated dbg
+      (fun () ->
+        match !backend_kind with
+        | Openvswitch -> (
+            (
+                let msg = Printf.sprintf "Tunnel port config has some defect %s" tunnel_port in
+                let remote = match remote_ip with
+                | Some r -> r
+                | None -> raise (Network_error (Internal_error msg)) in
+                let proto = match protocol with
+                | Some p -> p
+                | None -> raise (Network_error (Internal_error msg)) in
+                let id = match tunnel_id with
+                | Some t -> t
+                | None -> raise (Network_error (Internal_error msg)) in
+                match proto with
+                | "vxlan" ->
+                    let iface = tunnel_port in
+                    let vni = int_of_string id in
+                    let udp_port = 4789 in
+                    ignore (Ovs.create_tunnel_port proto remote udp_port iface bridge vni) ;
+                    let devname = Printf.sprintf "vxlan_sys_%d" udp_port in
+                    let options = [("rx","off"); ("tx","off")] in
+                    (* disable checksum offload *)
+                    Ethtool.set_offload devname options ;
+                    debug "setup tunnel on %s (%s %s %s) succeeds" bridge proto remote id
+                | _ ->
+                    debug "fail to setup tunnel on %s (%s %s %s)" bridge proto remote id ;
+                    raise (Network_error (Internal_error msg))
+            ) ;
+          )
+        | Bridge ->
+            raise (Network_error Not_implemented)
+      )
+      ()
+
   let remove_port dbg bridge name =
     Debug.with_thread_associated dbg
       (fun () ->
@@ -1343,6 +1380,23 @@ module Bridge = struct
             ignore (Ovs.destroy_port name)
         | Bridge ->
             ignore (Brctl.destroy_port bridge name)
+      )
+      ()
+
+  let remove_tunnel dbg bridge tunnel =
+    Debug.with_thread_associated dbg
+      (fun () ->
+        debug "Removing tunnel %s from bridge %s" tunnel bridge ;
+        let config = get_config bridge in
+        ( if List.mem_assoc tunnel config.tunnels then
+            let tunnels = List.remove_assoc tunnel config.tunnels in
+            update_config bridge {config with tunnels}
+        ) ;
+        match !backend_kind with
+        | Openvswitch ->
+            ignore (Ovs.destroy_port tunnel)
+        | Bridge ->
+            raise (Network_error Not_implemented)
       )
       ()
 
@@ -1453,7 +1507,7 @@ module Bridge = struct
         List.iter
           (function
             | ( bridge_name
-              , ({ports; vlan; bridge_mac; igmp_snooping; other_config; _} as c)
+              , ({tunnels; ports; vlan; bridge_mac; igmp_snooping; other_config; _} as c)
               ) ->
                 update_config bridge_name c ;
                 exec (fun () ->
@@ -1467,6 +1521,16 @@ module Bridge = struct
                           (Some bond_properties) (Some kind)
                       )
                       ports
+                ) ;
+                exec (fun () ->
+                    List.iter
+                      (fun ( tunnel_port
+                           , {remote_ip; protocol; tunnel_id}
+                           ) ->
+                        add_tunnel dbg bridge_name tunnel_port remote_ip protocol
+                          tunnel_id
+                      )
+                      tunnels
                 )
             )
           config
