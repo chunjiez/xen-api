@@ -3139,6 +3139,11 @@ functor
         info "VM.get_secureboot_readiness: self = '%s'" (vm_uuid ~__context self) ;
         Local.VM.get_secureboot_readiness ~__context ~self
 
+      let update_secure_boot_certificates ~__context ~self ~force =
+        info "VM.update_secure_boot_certificates: self = '%s', force = %b'"
+          (vm_uuid ~__context self) force ;
+        Local.VM.update_secure_boot_certificates ~__context ~self ~force
+
       let set_blocked_operations ~__context ~self ~value =
         info "VM.set_blocked_operations: self = '%s'" (vm_uuid ~__context self) ;
         Local.VM.set_blocked_operations ~__context ~self ~value ;

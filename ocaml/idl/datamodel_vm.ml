@@ -2434,6 +2434,14 @@ let vm_secureboot_readiness =
         , "Secured boot is enabled on this VM and the certificates defined in \
            its EFI variables are incomplete"
         )
+      ; ( "certs_expired"
+        , "Secured boot is enabled on this VM and the certificates have \
+           expired"
+        )
+      ; ( "certs_due_to_expire"
+        , "Secured boot is enabled on this VM and the certificates will expire \
+           within one year"
+        )
       ]
     )
 
@@ -2442,6 +2450,28 @@ let get_secureboot_readiness =
     ~params:[(Ref _vm, "self", "The VM")]
     ~result:(vm_secureboot_readiness, "The secureboot readiness of the VM")
     ~doc:"Return the secureboot readiness of the VM"
+    ~allowed_roles:_R_POOL_ADMIN ()
+
+let update_secure_boot_certificates =
+  call ~name:"update_secure_boot_certificates" ~lifecycle:[]
+    ~params:
+      [
+        (Ref _vm, "self", "The VM")
+      ; ( Bool
+        , "force"
+        , "Force update even if certificates are not expired (default: false)"
+        )
+      ]
+    ~result:
+      ( String
+      , "Result of the update operation: 'none' (nothing to do), 'updated' \
+         (certificates updated), or 'failed' (operation failed)"
+      )
+    ~doc:
+      "Update the VM's UEFI Secure Boot certificates (PK, KEK, db) to include \
+       both 2011 and 2023 Microsoft certificates. The VM must be in a halted \
+       state. This operation will check the certificate expiry status and \
+       update if needed, unless force is set to true."
     ~allowed_roles:_R_POOL_ADMIN ()
 
 (** VM (or 'guest') configuration: *)
@@ -2582,6 +2612,7 @@ let t =
       ; restart_device_models
       ; set_uefi_mode
       ; get_secureboot_readiness
+      ; update_secure_boot_certificates
       ; set_blocked_operations
       ; add_to_blocked_operations
       ; remove_from_blocked_operations

@@ -6223,6 +6223,15 @@ let vm_get_secureboot_readiness printer rpc session_id params =
   printer
     (Cli_printer.PMsg (Record_util.vm_secureboot_readiness_to_string result))
 
+let vm_update_secure_boot_certificates printer rpc session_id params =
+  let uuid = List.assoc "uuid" params in
+  let vm = Client.VM.get_by_uuid ~rpc ~session_id ~uuid in
+  let force = get_bool_param params "force" in
+  let result =
+    Client.VM.update_secure_boot_certificates ~rpc ~session_id ~self:vm ~force
+  in
+  printer (Cli_printer.PMsg result)
+
 let cd_list printer rpc session_id params =
   let srs = Client.SR.get_all_records_where ~rpc ~session_id ~expr:"true" in
   let cd_srs =

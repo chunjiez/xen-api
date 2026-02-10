@@ -2748,6 +2748,18 @@ let rec cmdtable_data : (string * cmd_spec) list =
       ; flags= []
       }
     )
+  ; ( "vm-update-secure-boot-certificates"
+    , {
+        reqd= ["uuid"]
+      ; optn= ["force"]
+      ; help=
+          "Update the VM's UEFI Secure Boot certificates to include both 2011 \
+           and 2023 Microsoft certificates. The VM must be halted. Use force=true \
+           to update even if certificates are not expired."
+      ; implementation= No_fd Cli_operations.vm_update_secure_boot_certificates
+      ; flags= []
+      }
+    )
   ; ( "vm-group-create"
     , {
         reqd= ["name-label"; "placement"]

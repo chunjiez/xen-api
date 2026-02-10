@@ -1687,6 +1687,77 @@ let set_uefi_mode ~__context ~self ~mode =
   let args = [id; Helpers.uefi_mode_to_string mode] in
   Helpers.call_script !Xapi_globs.varstore_sb_state args
 
+let check_certificate_expiry uuid =
+  (* Check certificate expiry by examining the db variable which contains MS certificates
+     Returns: `ready | `certs_expired | `certs_due_to_expire *)
+  try
+    (* Call varstore-get to retrieve the db EFI variable containing certificates *)
+    let guid = "d719b2cb-3d3a-4596-a3bc-dad00e67656f" in
+    (* EFI_IMAGE_SECURITY_DATABASE_GUID *)
+    let varstore_get_output =
+      Helpers.call_script "/usr/bin/varstore-get" [uuid; guid; "db"]
+    in
+    (* Parse X.509 certificates from the output and check expiry
+       Note: varstore-get returns binary data, we need to parse it as X.509 *)
+    let now = Ptime_clock.now () in
+    let one_year_later =
+      match Ptime.add_span now (Ptime.Span.of_int_s (365 * 24 * 60 * 60)) with
+      | Some t ->
+          t
+      | None ->
+          now
+    in
+    (* Try to decode the certificate(s) from the output *)
+    match X509.Certificate.decode_der (Cstruct.of_string varstore_get_output) with
+    | Ok cert ->
+        let _, not_after = X509.Certificate.validity cert in
+        if Ptime.is_later ~than:not_after now then
+          `certs_expired
+        else if Ptime.is_later ~than:not_after one_year_later then
+          `certs_due_to_expire
+        else
+          `ready
+    | Error _ -> (
+      (* If single cert decode fails, try to decode as certificate list *)
+      match
+        X509.Certificate.decode_pem_multiple (Cstruct.of_string varstore_get_output)
+      with
+      | Ok certs ->
+          (* Check the earliest expiry date among all certificates *)
+          let earliest_expiry =
+            List.fold_left
+              (fun acc cert ->
+                let _, not_after = X509.Certificate.validity cert in
+                match acc with
+                | None ->
+                    Some not_after
+                | Some earliest ->
+                    if Ptime.is_earlier not_after ~than:earliest then
+                      Some not_after
+                    else
+                      Some earliest
+              )
+              None certs
+          in
+          (match earliest_expiry with
+          | Some not_after ->
+              if Ptime.is_later ~than:not_after now then
+                `certs_expired
+              else if Ptime.is_later ~than:not_after one_year_later then
+                `certs_due_to_expire
+              else
+                `ready
+          | None ->
+              `ready
+          )
+      | Error _ ->
+          (* Cannot parse certificates, assume ready *)
+          `ready
+    )
+  with _ ->
+    (* If varstore-get fails or is not available, return ready *)
+    `ready
+
 let get_secureboot_readiness ~__context ~self =
   let vmr = Db.VM.get_record ~__context ~self in
   match Xapi_xenops.firmware_of_vm vmr with
@@ -1708,9 +1779,9 @@ let get_secureboot_readiness ~__context ~self =
         | None ->
             `first_boot
         | Some _ -> (
+            let uuid = Db.VM.get_uuid ~__context ~self in
             let varstore_ls =
-              Helpers.call_script !Xapi_globs.varstore_ls
-                [Db.VM.get_uuid ~__context ~self]
+              Helpers.call_script !Xapi_globs.varstore_ls [uuid]
             in
             let ls_lines = String.split_on_char '\n' varstore_ls in
             let ls_keys =
@@ -1726,16 +1797,100 @@ let get_secureboot_readiness ~__context ~self =
             let kek_present = List.mem "KEK" ls_keys in
             let db_present = List.mem "db" ls_keys in
             let dbx_present = List.mem "dbx" ls_keys in
+            (* Check basic certificate structure first *)
             match (pk_present, kek_present, db_present, dbx_present) with
-            | true, true, true, true ->
-                `ready
-            | true, true, true, false ->
-                `ready_no_dbx
             | false, _, _, _ ->
                 `setup_mode
-            | _, _, _, _ ->
+            | true, false, _, _ | true, true, false, _ ->
                 `certs_incomplete
+            | true, true, true, _ ->
+                (* Certificates are present, now check their expiry status *)
+                let expiry_status = check_certificate_expiry uuid in
+                (match expiry_status with
+                | `certs_expired ->
+                    `certs_expired
+                | `certs_due_to_expire ->
+                    `certs_due_to_expire
+                | `ready ->
+                    if dbx_present then
+                      `ready
+                    else
+                      `ready_no_dbx
+                )
           )
+      )
+    )
+
+let update_secure_boot_certificates ~__context ~self ~force =
+  let uuid = Db.VM.get_uuid ~__context ~self in
+  debug "%s: VM=%s force=%b" __FUNCTION__ uuid force ;
+  (* Check if VM is halted *)
+  let power_state = Db.VM.get_power_state ~__context ~self in
+  if power_state <> `Halted then (
+    error "%s: VM %s is not halted (power_state=%s)" __FUNCTION__ uuid
+      (Record_util.power_state_to_string power_state) ;
+    raise
+      Api_errors.(
+        Server_error
+          ( vm_bad_power_state
+          , [
+              Ref.string_of self
+            ; Record_util.power_state_to_string `Halted
+            ; Record_util.power_state_to_string power_state
+            ]
+          )
+      )
+  ) ;
+  (* Check if VM has UEFI and secure boot enabled *)
+  let vmr = Db.VM.get_record ~__context ~self in
+  match Xapi_xenops.firmware_of_vm vmr with
+  | Bios ->
+      debug "%s: VM %s is not UEFI, nothing to do" __FUNCTION__ uuid ;
+      "none"
+  | Uefi _ -> (
+      let platformdata = Db.VM.get_platform ~__context ~self in
+      match
+        Vm_platform.is_true ~key:"secureboot" ~platformdata ~default:false
+      with
+      | false ->
+          debug "%s: VM %s does not have secure boot enabled, nothing to do"
+            __FUNCTION__ uuid ;
+          "none"
+      | true -> (
+        try
+          (* Get current certificate status *)
+          let readiness = get_secureboot_readiness ~__context ~self in
+          let needs_update =
+            force
+            || readiness = `certs_expired
+            || readiness = `certs_due_to_expire
+            || readiness = `ready_no_dbx
+            || readiness = `setup_mode
+            || readiness = `certs_incomplete
+          in
+          if not needs_update then (
+            debug "%s: VM %s certificates are up to date, nothing to do"
+              __FUNCTION__ uuid ;
+            "none"
+          ) else (
+            debug "%s: Updating certificates for VM %s (readiness=%s)" __FUNCTION__
+              uuid
+              (Record_util.vm_secureboot_readiness_to_string readiness) ;
+            (* Call varstore-sb-state to reset certificates to defaults with updated certs *)
+            let args = [uuid; "user"] in
+            let result =
+              Helpers.call_script !Xapi_globs.varstore_sb_state args
+            in
+            debug "%s: varstore-sb-state result for VM %s: %s" __FUNCTION__ uuid
+              result ;
+            info "%s: Successfully updated certificates for VM %s" __FUNCTION__
+              uuid ;
+            "updated"
+          )
+        with e ->
+          error "%s: Failed to update certificates for VM %s: %s" __FUNCTION__
+            uuid (Printexc.to_string e) ;
+          "failed"
       )
     )
 
